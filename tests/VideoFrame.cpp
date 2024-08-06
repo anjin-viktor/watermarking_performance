@@ -144,6 +144,7 @@ BOOST_AUTO_TEST_CASE(apply_wr_multithread)
 
   auto preference = WR::createRandom(width, height, 10);
   VideoFrame frameMT = frame;
+  VideoFrame frameMTVert = frame;
 
   frame.applyWR(preference, 1.0, true);
 
@@ -154,6 +155,11 @@ BOOST_AUTO_TEST_CASE(apply_wr_multithread)
   uint8_t* pdataMT = frameMT.data(0);
   std::size_t size = stride * height;
   BOOST_CHECK_EQUAL_COLLECTIONS(pdata, pdata + size, pdataMT, pdataMT + size);
+
+  frameMTVert.applyWR(preference, 1.0, true, threadPool, VideoFrame::Auto, VideoFrame::Collumns);
+  pdataMT = frameMTVert.data(0);
+  BOOST_CHECK_EQUAL_COLLECTIONS(pdata, pdata + size, pdataMT, pdataMT + size);
+
 }
 
 BOOST_AUTO_TEST_CASE(apply_wr_sse)
@@ -165,8 +171,8 @@ BOOST_AUTO_TEST_CASE(apply_wr_sse)
   auto pframeSSE = std::make_shared<VideoFrame>(*pframe);
   auto preference = WR::createRandom(width, height, 10);
 
-  pframe->applyWR(preference, 1.0, true, ThreadPool(0), VideoFrame::C);
-  pframeSSE->applyWR(preference, 1.0, true, ThreadPool(0), VideoFrame::SSE);
+  pframe->applyWR(preference, 1.0, true, VideoFrame::C);
+  pframeSSE->applyWR(preference, 1.0, true, VideoFrame::SSE);
 
   uint8_t *pdata = pframe->data(0);
   uint8_t* pdataSSE = pframeSSE->data(0);
@@ -178,8 +184,8 @@ BOOST_AUTO_TEST_CASE(apply_wr_sse)
   pframe = WR::createRandom(width, height, 0xFF);
   pframeSSE = std::make_shared<VideoFrame>(*pframe);
 
-  pframe->applyWR(preference, 1.0, false, ThreadPool(0), VideoFrame::C);
-  pframeSSE->applyWR(preference, 1.0, false, ThreadPool(0), VideoFrame::SSE);
+  pframe->applyWR(preference, 1.0, false, VideoFrame::C);
+  pframeSSE->applyWR(preference, 1.0, false, VideoFrame::SSE);
 
   pdata = pframe->data(0);
   pdataSSE = pframeSSE->data(0);
@@ -195,8 +201,8 @@ BOOST_AUTO_TEST_CASE(apply_wr_avx)
   auto pframeAVX = std::make_shared<VideoFrame>(*pframe);
   auto preference = WR::createRandom(width, height, 10);
 
-  pframe->applyWR(preference, 1.0, true, ThreadPool(0), VideoFrame::C);
-  pframeAVX->applyWR(preference, 1.0, true, ThreadPool(0), VideoFrame::AVX);
+  pframe->applyWR(preference, 1.0, true, VideoFrame::C);
+  pframeAVX->applyWR(preference, 1.0, true, VideoFrame::AVX);
 
   uint8_t* pdata = pframe->data(0);
   uint8_t* pdataAVX = pframeAVX->data(0);
@@ -208,8 +214,8 @@ BOOST_AUTO_TEST_CASE(apply_wr_avx)
   pframe = WR::createRandom(width, height, 0xFF);
   pframeAVX = std::make_shared<VideoFrame>(*pframe);
 
-  pframe->applyWR(preference, 1.0, false, ThreadPool(0), VideoFrame::C);
-  pframeAVX->applyWR(preference, 1.0, false, ThreadPool(0), VideoFrame::AVX);
+  pframe->applyWR(preference, 1.0, false, VideoFrame::C);
+  pframeAVX->applyWR(preference, 1.0, false, VideoFrame::AVX);
 
   pdata = pframe->data(0);
   pdataAVX = pframeAVX->data(0);
@@ -217,5 +223,59 @@ BOOST_AUTO_TEST_CASE(apply_wr_avx)
   BOOST_CHECK_EQUAL_COLLECTIONS(pdata, pdata + size, pdataAVX, pdataAVX + size);
 }
 
+BOOST_AUTO_TEST_CASE(open_save_grayscale)
+{
+  VideoFrame frame(getSourceDir(__FILE__) + "images/sea_640.jpg", VideoFrame::ColorFormat::Grayscale);
+  BOOST_CHECK_EQUAL(frame.width(), 480);
+  BOOST_CHECK_EQUAL(frame.height(), 640);
+
+  uint8_t* pdata = frame.data(0);
+  int p0 = pdata[0];
+  int p1 = pdata[1];
+  int p2 = pdata[2];
+
+  BOOST_CHECK_EQUAL(p0, 58);
+  BOOST_CHECK_EQUAL(p1, 61);
+  BOOST_CHECK_EQUAL(p2, 62);
+
+  frame.save(getSourceDir(__FILE__) + "out/open_save_grayscale.png");
+
+  VideoFrame frameStored(getSourceDir(__FILE__) + "out/open_save_grayscale.png");
+  BOOST_CHECK_EQUAL(frameStored.width(), 480);
+  BOOST_CHECK_EQUAL(frameStored.height(), 640);
+
+  pdata = frameStored.data(0);
+
+  int b0 = pdata[0];
+  int g0 = pdata[1];
+  int r0 = pdata[2];
+  int b1 = pdata[3];
+  int b2 = pdata[6];
+
+  BOOST_CHECK_EQUAL(b0, 58);
+  BOOST_CHECK_EQUAL(g0, 58);
+  BOOST_CHECK_EQUAL(r0, 58);
+  BOOST_CHECK_EQUAL(b1, 61);
+  BOOST_CHECK_EQUAL(b2, 62);
+}
+
+BOOST_AUTO_TEST_CASE(fdct_idct)
+{
+  VideoFrame frame(getSourceDir(__FILE__) + "images/sea_640.jpg", VideoFrame::ColorFormat::Grayscale);
+
+  std::vector<float> dctData = frame.fDCT();
+  VideoFrame frameIDCT = VideoFrame::iDCT(dctData, frame.width(), frame.height());
+  frameIDCT.save(getSourceDir(__FILE__) + "out/after_dct.png");
+
+  uint8_t* pdata = frame.data(0);
+  int p0 = pdata[0];
+  int p1 = pdata[1];
+  int p2 = pdata[2];
+
+  BOOST_CHECK_EQUAL(p0, 58);
+  BOOST_CHECK_EQUAL(p1, 61);
+  BOOST_CHECK_EQUAL(p2, 62);
+
+}
 
 BOOST_AUTO_TEST_SUITE_END();

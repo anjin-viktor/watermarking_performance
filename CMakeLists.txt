@@ -6,4 +6,5 @@ set(Boost_USE_STATIC_RUNTIME OFF)
 
 add_subdirectory(src)
 add_subdirectory(tests)
+add_subdirectory(apps)
 enable_testing()

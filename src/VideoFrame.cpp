@@ -1,37 +1,48 @@
 #include "VideoFrame.h"
 
 #include <opencv2/opencv.hpp>
+#ifdef WIN32
 #include <intrin.h>
+#endif
 
-VideoFrame::VideoFrame(std::size_t width, std::size_t height):
+VideoFrame::VideoFrame(std::size_t width, std::size_t height, ColorFormat colorFormat):
   m_width(width),
-  m_height(height)
+  m_height(height),
+  m_colorFormat(colorFormat)
 {
-  std::size_t size = m_width * m_height * 3;
+  std::size_t size = m_width * m_height;
+
+  if (m_colorFormat == ColorFormat::Color)
+    size *= 3;
+
   m_data.resize(1);
   m_data[0].resize(size);
 }
 
-VideoFrame::VideoFrame(const std::string& fileName):
+VideoFrame::VideoFrame(const std::string& fileName, ColorFormat colorFormat):
   m_width(0),
-  m_height(0)
+  m_height(0),
+  m_colorFormat(colorFormat)
 {
   cv::Mat image;
-  image = cv::imread(fileName, cv::IMREAD_COLOR);
+  image = cv::imread(fileName, m_colorFormat == ColorFormat::Color ? cv::IMREAD_COLOR : cv::IMREAD_GRAYSCALE);
 
   m_width = image.cols;
   m_height = image.rows;
 
+  std::size_t size = m_width * m_height;
+  if (m_colorFormat == ColorFormat::Color)
+    size *= 3;
 
   m_data.resize(1);
-  m_data[0].resize(m_width * m_height * 3);
-  std::copy(image.data, image.data + m_width * m_height * 3, m_data[0].begin());
+  m_data[0].resize(size);
 
+  std::copy(image.data, image.data + size, m_data[0].begin());
 }
 
 void VideoFrame::save(const std::string& fileName)
 {
-  cv::Mat image = cv::Mat((int)m_height, (int)m_width, CV_8UC3, &(m_data[0][0]));
+  cv::Mat image = cv::Mat((int)m_height, (int)m_width, m_colorFormat == ColorFormat::Color ? CV_8UC3 : CV_8UC1, &(m_data[0][0]));
   cv::imwrite(fileName, image);
 }
 
@@ -55,27 +66,149 @@ uint8_t* VideoFrame::data(int plane)
   return &(m_data[0][plane]);
 }
 
-namespace
+std::vector<float> VideoFrame::fDCT()
 {
-  void applyWRImpl_C(uint8_t* preference, uint8_t* pdata, std::size_t stride, std::size_t height, double alpha, bool key)
+  VideoFrame res(m_width, m_height, m_colorFormat);
+  std::vector<float> srcData;
+  srcData.insert(srcData.end(), m_data[0].begin(), m_data[0].end());
+  std::vector<float> dstData(srcData.size());
+
+  cv::Mat src = cv::Mat((int)m_height, (int)m_width, CV_32F, &srcData[0]);
+  cv::Mat dst = cv::Mat((int)m_height, (int)m_width, CV_32F, &dstData[0]);
+
+  cv::dct(src, dst);
+
+  return dstData;
+}
+
+void VideoFrame::DCTSharpening(float threshold, int referenceMax)
+{
+  const int blockSize = 8;
+  std::size_t stride = m_width * (m_colorFormat == VideoFrame::Color ? 3 : 1);
+
+  for (int i = 0; i + blockSize <= m_width; i += blockSize)
   {
-    for (int i = 0; i < height; i++)
+    for (int j = 0; j + blockSize <= m_height; j += blockSize)
     {
-      for (int j = 0; j < stride; j++)
+      std::vector<float> srcData(blockSize * blockSize);
+      for (int posX = 0; posX < blockSize; posX++)
       {
-        int val = pdata[i * stride + j];
-        int wr = preference[i * stride + j] * alpha;
-        if (alpha - 1.0 > std::numeric_limits<float>::epsilon())
-          wr = (int)wr * alpha;
-        if (key)
-          val = std::min(255, val + wr);
-        else
-          val = std::max(0, val - wr);
-        pdata[i * stride + j] = val;
+        for (int posY = 0; posY < blockSize; posY++)
+          srcData[posX + posY * blockSize] = m_data[0][i + posX + (j + posY) * stride];
+      }
+
+      std::vector<float> dstData(srcData.size());
+      cv::Mat src = cv::Mat((int)blockSize, (int)blockSize, CV_32F, &srcData[0]);
+      cv::Mat dst = cv::Mat((int)blockSize, (int)blockSize, CV_32F, &dstData[0]);
+      cv::dct(src, dst);
+
+      for (int k = 0; k < dstData.size(); k++)
+      {
+        if (dstData[k] < threshold)
+        {
+          if (rand() % 2)
+            dstData[k] = 0;
+          else
+          {
+            int sign = dstData[k] > 0 ? 1 : -1;
+            dstData[k] = threshold * sign;
+          }
+        }
+      }
+
+/*      for (int k1 = 0; k1 < blockSize; k1++)
+      {
+        for (int k2 = blockSize - k1 - 1; k2 < blockSize; k2++)
+        {
+          int idx = k1 * blockSize + k2;
+          if (abs(dstData[idx]) < threshold)
+          {
+            if (rand() % 2)
+              dstData[idx] = 0;
+            else
+            {
+              int sign = dstData[idx] > 0 ? 1 : -1;
+              dstData[idx] = threshold * sign;
+            }
+          }
+        }
+      }*/
+
+      cv::idct(dst, src);
+
+      for (int posX = 0; posX < blockSize; posX++)
+      {
+        for (int posY = 0; posY < blockSize; posY++)
+        {
+          int val = srcData[posX + posY * blockSize];
+          if (val < 0)
+            val = 0;
+          else if (val > referenceMax)
+            val = referenceMax;
+
+          m_data[0][i + posX + (j + posY) * stride] = val;
+        }
       }
     }
   }
+}
 
+VideoFrame VideoFrame::iDCT(std::vector<float> dctData, std::size_t width, std::size_t height)
+{
+  VideoFrame res(width, height, VideoFrame::Grayscale);
+  std::vector<float> dstData(dctData.size());
+
+  cv::Mat src = cv::Mat((int)height, (int)width, CV_32F, &dctData[0]);
+  cv::Mat dst = cv::Mat((int)height, (int)width, CV_32F, &dstData[0]);
+
+  cv::idct(src, dst);
+  std::copy(dstData.begin(), dstData.end(), res.m_data[0].begin());
+
+  return res;
+}
+
+namespace
+{
+  void applyWRImpl_C(uint8_t* preference, uint8_t* pdata, std::size_t width, std::size_t stride, std::size_t height, double alpha, bool key, bool bypassByRows = true)
+  {
+    if (bypassByRows)
+    {
+      for (int i = 0; i < height; i++)
+      {
+        for (int j = 0; j < width; j++)
+        {
+          int val = pdata[i * stride + j];
+          int wr = preference[i * stride + j] * alpha;
+          if (alpha - 1.0 > std::numeric_limits<float>::epsilon())
+            wr = (int)wr * alpha;
+          if (key)
+            val = std::min(255, val + wr);
+          else
+            val = std::max(0, val - wr);
+          pdata[i * stride + j] = val;
+        }
+      }
+    }
+    else
+    {
+      for (int j = 0; j < width; j++)
+      {
+        for (int i = 0; i < height; i++)
+        {
+          int val = pdata[i * stride + j];
+          int wr = preference[i * stride + j] * alpha;
+          if (alpha - 1.0 > std::numeric_limits<float>::epsilon())
+            wr = (int)wr * alpha;
+          if (key)
+            val = std::min(255, val + wr);
+          else
+            val = std::max(0, val - wr);
+          pdata[i * stride + j] = val;
+        }
+      }
+    }
+  }
+#ifdef WIN32
   void applyWRImpl_SSE(uint8_t* preference, uint8_t* pdata, std::size_t stride, std::size_t height, bool key)
   {
     for (int i = 0; i < height; i++)
@@ -143,13 +276,15 @@ namespace
       }
     }
   }
+#endif
 
-  void applyWRImpl(uint8_t *preference, uint8_t *pdata, std::size_t stride, std::size_t height, double alpha, bool key, VideoFrame::Optimization optimization)
+  void applyWRImpl(uint8_t *preference, uint8_t *pdata, std::size_t width, std::size_t stride, std::size_t height, double alpha, bool key, VideoFrame::Optimization optimization, VideoFrame::ThreadingType threading)
   {
     if (optimization == VideoFrame::C || optimization == VideoFrame::Auto)
     {
-      applyWRImpl_C(preference, pdata, stride, height, alpha, key);
+      applyWRImpl_C(preference, pdata, width, stride, height, alpha, key, true/*, threading == VideoFrame::Rows*/);
     }
+#ifdef WIN32
     else if (optimization == VideoFrame::SSE)
     {
       applyWRImpl_SSE(preference, pdata, stride, height, key);
@@ -158,12 +293,26 @@ namespace
     {
       applyWRImpl_AVX(preference, pdata, stride, height, key);
     }
+#else
+    else
+    {
+      applyWRImpl_C(preference, pdata, stride, height, alpha, key, true);
+    }
+
+#endif
   }
 
 
 }
 
-bool VideoFrame::applyWR(std::shared_ptr<VideoFrame> preference, double alpha, bool key, ThreadPool& threadPool, VideoFrame::Optimization optimization)
+bool VideoFrame::applyWR(std::shared_ptr<VideoFrame> preference, double alpha, bool key, VideoFrame::Optimization optimization)
+{
+  ThreadPool threadPool(0);
+  return applyWR(preference, alpha, key, threadPool, optimization);
+}
+
+
+bool VideoFrame::applyWR(std::shared_ptr<VideoFrame> preference, double alpha, bool key, ThreadPool& threadPool, VideoFrame::Optimization optimization, VideoFrame::ThreadingType threading)
 {
   if (!preference)
     return false;
@@ -174,11 +323,11 @@ bool VideoFrame::applyWR(std::shared_ptr<VideoFrame> preference, double alpha, b
 
   uint8_t* pdata = &m_data[0][0];
   uint8_t* pwr = preference->data(0);
-  std::size_t stride = m_width * 3;
+  std::size_t stride = m_width * (m_colorFormat == VideoFrame::Color ? 3 : 1);
 
   if (threadPool.size() == 0)
   {
-    applyWRImpl(pwr, pdata, stride, m_height, alpha, key, optimization);
+    applyWRImpl(pwr, pdata, stride, stride, m_height, alpha, key, optimization, threading);
     return true;
   }
 
@@ -186,14 +335,43 @@ bool VideoFrame::applyWR(std::shared_ptr<VideoFrame> preference, double alpha, b
   std::vector<std::future<void>> results;
 
   std::vector<std::size_t> tasksHeight(threads);
-  for (int i = 0; i < threads - 1; i++)
-    tasksHeight[i] = m_height / threads;
-  tasksHeight[threads - 1] = m_height - m_height / threads * (threads - 1);
+  std::vector<uint8_t *> tasksPData(threads);
+  std::vector<uint8_t*> tasksPwr(threads);
+  std::vector<std::size_t> tasksWidth(threads);
+
+  if (threading == VideoFrame::Rows)
+  {
+    std::size_t offset = 0;
+    for (int i = 0; i < threads; i++)
+    {
+      tasksHeight[i] = m_height / threads;
+      tasksPData[i] = pdata + offset;
+      tasksPwr[i] = pwr + offset;
+      tasksWidth[i] = stride;
+      offset += tasksHeight[i] * stride;
+    }
+    tasksHeight[threads - 1] = m_height - m_height / threads * (threads - 1);
+  }
+  else
+  {
+    std::size_t offset = 0;
+    for (int i = 0; i < threads; i++)
+    {
+      tasksHeight[i] = m_height;
+      tasksPData[i] = pdata + offset;
+      tasksPwr[i] = pwr + offset;
+      tasksWidth[i] = stride / threads;
+      offset += stride / threads;
+    }
+    tasksWidth[threads - 1] = stride - stride / threads * (threads - 1);
+  }
+
+
 
   std::size_t offset = 0;
   for (int i = 0; i < threads; i++)
   {
-    results.emplace_back(threadPool.enqueue(applyWRImpl, pwr + offset, pdata + offset, stride, tasksHeight[i], alpha, key, optimization));
+    results.emplace_back(threadPool.enqueue(applyWRImpl, tasksPwr[i], tasksPData[i], tasksWidth[i], stride, tasksHeight[i], alpha, key, optimization, threading));
     offset += tasksHeight[i] * stride;
   }
 
